@@ -53,6 +53,7 @@ import (
 	"go/format"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 
 	gen "github.com/hooklift/gowsdl"
@@ -114,29 +115,34 @@ func main() {
 		log.Fatalln(err)
 	}
 
-	pkg := filepath.Join(*dir, *pkg)
-	err = os.Mkdir(pkg, 0744)
+	for k, v := range gocode {
+		output := filepath.Join(*dir, *pkg, k)
+		log.Println("Generating: ", output)
+		err = os.MkdirAll(path.Dir(output), 0744)
+		file, err := os.Create(output)
+		if err != nil {
+			log.Fatalln(err)
+		}
+		defer file.Close()
 
-	file, err := os.Create(filepath.Join(pkg, *outFile))
-	if err != nil {
-		log.Fatalln(err)
+		data := new(bytes.Buffer)
+		data.Write(v["header"])
+		data.Write(v["types"])
+		data.Write(v["operations"])
+		data.Write(v["soap"])
+
+		// go fmt the generated code
+		source, err := format.Source(data.Bytes())
+		if err != nil {
+			_, _ = file.Write(data.Bytes())
+			log.Fatalln(err)
+		}
+
+		_, err = file.Write(source)
+		if err != nil {
+			log.Fatalln(err)
+		}
 	}
-	defer file.Close()
-
-	data := new(bytes.Buffer)
-	data.Write(gocode["header"])
-	data.Write(gocode["types"])
-	data.Write(gocode["operations"])
-	data.Write(gocode["soap"])
-
-	// go fmt the generated code
-	source, err := format.Source(data.Bytes())
-	if err != nil {
-		file.Write(data.Bytes())
-		log.Fatalln(err)
-	}
-
-	file.Write(source)
 
 	log.Println("Done 👍")
 }

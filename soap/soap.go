@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -29,15 +30,14 @@ type SOAPEnvelopeResponse struct {
 }
 
 type SOAPEnvelope struct {
-	XMLName xml.Name `xml:"soap:Envelope"`
-	XmlNS   string   `xml:"xmlns:soap,attr"`
+	XMLName xml.Name `xml:"http://www.w3.org/2003/05/soap-envelope Envelope"`
 
 	Header *SOAPHeader
 	Body   SOAPBody
 }
 
 type SOAPHeader struct {
-	XMLName xml.Name `xml:"soap:Header"`
+	XMLName xml.Name `xml:"http://www.w3.org/2003/05/soap-envelope Header"`
 
 	Headers []interface{}
 }
@@ -48,7 +48,7 @@ type SOAPHeaderResponse struct {
 }
 
 type SOAPBody struct {
-	XMLName xml.Name `xml:"soap:Body"`
+	XMLName xml.Name `xml:"http://www.w3.org/2003/05/soap-envelope Body"`
 
 	Content interface{} `xml:",omitempty"`
 
@@ -60,7 +60,7 @@ type SOAPBody struct {
 }
 
 type SOAPBodyResponse struct {
-	XMLName xml.Name `xml:"Body"`
+	XMLName xml.Name `xml:"http://www.w3.org/2003/05/soap-envelope Body"`
 
 	Content interface{} `xml:",omitempty"`
 
@@ -158,19 +158,68 @@ type FaultError interface {
 }
 
 type SOAPFault struct {
-	XMLName xml.Name `xml:"http://schemas.xmlsoap.org/soap/envelope/ Fault"`
+	XMLName xml.Name `xml:"http://www.w3.org/2003/05/soap-envelope Fault"`
 
-	Code   string     `xml:"faultcode,omitempty"`
-	String string     `xml:"faultstring,omitempty"`
-	Actor  string     `xml:"faultactor,omitempty"`
-	Detail FaultError `xml:"detail,omitempty"`
+	Code   Code   `xml:"Code,omitempty"`
+	Reason Reason `xml:"Reason,omitempty"`
+	Detail Detail `xml:"Detail,omitempty"`
+}
+
+type Code struct {
+	XMLName xml.Name `xml:"http://www.w3.org/2003/05/soap-envelope Code"`
+
+	Value   string   `xml:"Value,omitempty"`
+	Subcode *Subcode `xml:"Subcode,omitempty"`
+}
+
+type Subcode struct {
+	XMLName xml.Name `xml:"http://www.w3.org/2003/05/soap-envelope Subcode"`
+
+	Value   string   `xml:"Value,omitempty"`
+	Subcode *Subcode `xml:"Subcode,omitempty"`
+}
+
+type Reason struct {
+	XMLName xml.Name `xml:"http://www.w3.org/2003/05/soap-envelope Reason"`
+
+	Text string `xml:"Text,omitempty"`
+}
+
+type Detail struct {
+	XMLName xml.Name `xml:"http://www.w3.org/2003/05/soap-envelope Detail"`
+
+	Text string `xml:"Text,omitempty"`
+}
+
+func (f *SOAPFault) errorMessage() string {
+	if f.Detail.Text != "" {
+		return f.Detail.Text
+	}
+	if f.Reason.Text != "" {
+		return f.Reason.Text
+	}
+	return "unknown SOAP error"
+}
+
+func (f *SOAPFault) megreCodes() string {
+	var merged strings.Builder
+	merged.WriteString(f.Code.Value)
+
+	for subcode := f.Code.Subcode; subcode != nil; subcode = subcode.Subcode {
+		merged.WriteString("->")
+		merged.WriteString(subcode.Value)
+	}
+
+	return merged.String()
 }
 
 func (f *SOAPFault) Error() string {
-	if f.Detail != nil && f.Detail.HasData() {
-		return f.Detail.ErrorString()
+	message := f.errorMessage()
+	codes := f.megreCodes()
+	if codes == "" {
+		return message
 	}
-	return f.String
+	return fmt.Sprintf("%s (onvif error code: %s)", message, f.megreCodes())
 }
 
 // HTTPError is returned whenever the HTTP request to the server fails
@@ -191,7 +240,7 @@ const (
 	WssNsWSU        string = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
 	WssNsType       string = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText"
 	mtomContentType string = `multipart/related; start-info="application/soap+xml"; type="application/xop+xml"; boundary="%s"`
-	XmlNsSoapEnv    string = "http://schemas.xmlsoap.org/soap/envelope/"
+	XmlNsSoapEnv    string = "http://www.w3.org/2003/05/soap-envelope"
 )
 
 type WSSSecurityHeader struct {
@@ -414,9 +463,7 @@ func (s *Client) CallWithFaultDetail(soapAction string, request, response interf
 func (s *Client) call(ctx context.Context, soapAction string, request, response interface{}, faultDetail FaultError,
 	retAttachments *[]MIMEMultipartAttachment) error {
 	// SOAP envelope capable of namespace prefixes
-	envelope := SOAPEnvelope{
-		XmlNS: XmlNsSoapEnv,
-	}
+	envelope := SOAPEnvelope{}
 
 	if s.headers != nil && len(s.headers) > 0 {
 		envelope.Header = &SOAPHeader{
@@ -460,9 +507,8 @@ func (s *Client) call(ctx context.Context, soapAction string, request, response 
 	} else if s.opts.mma {
 		req.Header.Add("Content-Type", fmt.Sprintf(mmaContentType, encoder.(*mmaEncoder).Boundary()))
 	} else {
-		req.Header.Add("Content-Type", "text/xml; charset=\"utf-8\"")
+		req.Header.Add("Content-Type", "application/soap+xml; charset=\"utf-8\"")
 	}
-	req.Header.Add("SOAPAction", soapAction)
 	req.Header.Set("User-Agent", "gowsdl/0.1")
 	if s.opts.httpHeaders != nil {
 		for k, v := range s.opts.httpHeaders {
@@ -491,11 +537,7 @@ func (s *Client) call(ctx context.Context, soapAction string, request, response 
 	defer res.Body.Close()
 
 	if res.StatusCode >= 400 {
-		body, _ := ioutil.ReadAll(res.Body)
-		return &HTTPError{
-			StatusCode:   res.StatusCode,
-			ResponseBody: body,
-		}
+		return ExtractError(res)
 	}
 
 	// xml Decoder (used with and without MTOM) cannot handle namespace prefixes (yet),
@@ -503,9 +545,6 @@ func (s *Client) call(ctx context.Context, soapAction string, request, response 
 	respEnvelope := new(SOAPEnvelopeResponse)
 	respEnvelope.Body = SOAPBodyResponse{
 		Content: response,
-		Fault: &SOAPFault{
-			Detail: faultDetail,
-		},
 	}
 
 	mtomBoundary, err := getMtomHeader(res.Header.Get("Content-Type"))
@@ -538,4 +577,23 @@ func (s *Client) call(ctx context.Context, soapAction string, request, response 
 		*retAttachments = respEnvelope.Attachments
 	}
 	return respEnvelope.Body.ErrorFromFault()
+}
+
+func ExtractError(resp *http.Response) error {
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	var envelope SOAPEnvelope
+
+	dec := xml.NewDecoder(bytes.NewReader(body))
+	err = dec.Decode(&envelope)
+	if err != nil || envelope.Body.Fault == nil {
+		// Failed to parse SAOPFault, we can only return the less fine-grained HTTP Error here.
+		return &HTTPError{
+			StatusCode:   resp.StatusCode,
+			ResponseBody: body,
+		}
+	}
+	return envelope.Body.Fault
 }

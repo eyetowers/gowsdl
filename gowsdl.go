@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"text/template"
 	"time"
 	"unicode"
@@ -123,8 +122,9 @@ func NewGoWSDL(file, pkg string, ignoreTLS bool, exportAllTypes bool) (*GoWSDL, 
 
 // Start initiaties the code generation process by starting two goroutines: one
 // to generate types and another one to generate operations.
-func (g *GoWSDL) Start() (map[string][]byte, error) {
-	gocode := make(map[string][]byte)
+func (g *GoWSDL) Start() (map[string]map[string][]byte, error) {
+	gocode := make(map[string]map[string][]byte)
+	index := make(map[string]int)
 
 	err := g.unmarshal()
 	if err != nil {
@@ -136,38 +136,40 @@ func (g *GoWSDL) Start() (map[string][]byte, error) {
 		newTraverser(schema, g.wsdl.Types.Schemas).traverse()
 	}
 
-	var wg sync.WaitGroup
+	// Generate type files.
+	for _, schema := range g.wsdl.Types.Schemas {
+		if !hasTypes(schema) {
+			continue
+		}
+		i := index[schema.TargetNamespace]
+		index[schema.TargetNamespace] = i + 1
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		var err error
+		gofile := make(map[string][]byte)
 
-		gocode["types"], err = g.genTypes()
+		gofile["types"], err = g.genTypes(schema)
 		if err != nil {
 			log.Println("genTypes", "error", err)
 		}
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		var err error
-
-		gocode["operations"], err = g.genOperations()
+		gofile["header"], err = g.genHeader(NormalizePackageName(schema.TargetNamespace), schema.Xmlns)
 		if err != nil {
 			log.Println(err)
 		}
-	}()
 
-	wg.Wait()
+		if schema.TargetNamespace == g.wsdl.TargetNamespace {
+			gofile["operations"], err = g.genOperations()
+			if err != nil {
+				log.Println(err)
+			}
+		}
 
-	gocode["header"], err = g.genHeader()
-	if err != nil {
-		log.Println(err)
+		outputPath := filepath.Join(NormalizePackagePath(schema.TargetNamespace), fmt.Sprintf("%d.go", i))
+		gocode[outputPath] = gofile
 	}
-
 	return gocode, nil
+}
+
+func hasTypes(schema *XSDSchema) bool {
+	return len(schema.ComplexTypes)+len(schema.SimpleType)+len(schema.Elements) > 0
 }
 
 func (g *GoWSDL) fetchFile(loc *Location) (data []byte, err error) {
@@ -246,6 +248,7 @@ func (g *GoWSDL) resolveXSDExternals(schema *XSDSchema, loc *Location) error {
 	}
 
 	for _, impts := range schema.Imports {
+
 		// Download the file only if we have a hint in the form of schemaLocation.
 		if impts.SchemaLocation == "" {
 			log.Printf("[WARN] Don't know where to find XSD for %s", impts.Namespace)
@@ -266,7 +269,7 @@ func (g *GoWSDL) resolveXSDExternals(schema *XSDSchema, loc *Location) error {
 	return nil
 }
 
-func (g *GoWSDL) genTypes() ([]byte, error) {
+func (g *GoWSDL) genTypes(schema *XSDSchema) ([]byte, error) {
 	funcMap := template.FuncMap{
 		"toGoType":                 toGoType,
 		"stripns":                  stripns,
@@ -286,7 +289,7 @@ func (g *GoWSDL) genTypes() ([]byte, error) {
 
 	data := new(bytes.Buffer)
 	tmpl := template.Must(template.New("types").Funcs(funcMap).Parse(typesTmpl))
-	err := tmpl.Execute(data, g.wsdl.Types)
+	err := tmpl.Execute(data, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -317,20 +320,33 @@ func (g *GoWSDL) genOperations() ([]byte, error) {
 	return data.Bytes(), nil
 }
 
-func (g *GoWSDL) genHeader() ([]byte, error) {
+func (g *GoWSDL) genHeader(pkg string, imports map[string]string) ([]byte, error) {
 	funcMap := template.FuncMap{
 		"toGoType":             toGoType,
 		"stripns":              stripns,
 		"replaceReservedWords": replaceReservedWords,
 		"normalize":            normalize,
+		"normalizePackage":     normalizePackage,
 		"makePublic":           g.makePublicFn,
 		"findType":             g.findType,
 		"comment":              comment,
 	}
+	info := struct {
+		Package string
+		Imports map[string]string
+	}{
+		Package: pkg,
+		Imports: imports,
+	}
+	for k, v := range imports {
+		if k == "xs" || k == "xsd" || v == g.getNS() {
+			delete(imports, k)
+		}
+	}
 
 	data := new(bytes.Buffer)
 	tmpl := template.Must(template.New("header").Funcs(funcMap).Parse(headerTmpl))
-	err := tmpl.Execute(data, g.pkg)
+	err := tmpl.Execute(data, info)
 	if err != nil {
 		return nil, err
 	}
@@ -428,34 +444,70 @@ func normalize(value string) string {
 	return strings.Map(mapping, value)
 }
 
+func NormalizePackagePath(value string) string {
+	value = strings.TrimPrefix(value, "https://")
+	value = strings.TrimPrefix(value, "http://")
+
+	mapping := func(r rune) rune {
+		if r == '.' {
+			return '_'
+		}
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '/' {
+			return r
+		}
+		return -1
+	}
+	value = strings.Map(mapping, value)
+	value = strings.ToLower(value)
+
+	return value
+}
+
+func normalizePackage(value string) string {
+	value = NormalizePackagePath(value)
+
+	return "github.com/eltrac-eu/gonvif/pkg/generated/onvif/" + value
+}
+
+func NormalizePackageName(value string) string {
+	full := normalizePackage(value)
+	ss := strings.Split(full, "/")
+	return ss[len(ss)-1]
+}
+
 func goString(s string) string {
 	return strings.Replace(s, "\"", "\\\"", -1)
 }
 
 var xsd2GoTypes = map[string]string{
-	"string":        "string",
-	"token":         "string",
-	"float":         "float32",
-	"double":        "float64",
-	"decimal":       "float64",
-	"integer":       "int32",
-	"int":           "int32",
-	"short":         "int16",
-	"byte":          "int8",
-	"long":          "int64",
-	"boolean":       "bool",
-	"datetime":      "soap.XSDDateTime",
-	"date":          "soap.XSDDate",
-	"time":          "soap.XSDTime",
-	"base64binary":  "[]byte",
-	"hexbinary":     "[]byte",
-	"unsignedint":   "uint32",
-	"unsignedshort": "uint16",
-	"unsignedbyte":  "byte",
-	"unsignedlong":  "uint64",
-	"anytype":       "AnyType",
-	"ncname":        "NCName",
-	"anyuri":        "AnyURI",
+	"string":             "string",
+	"token":              "string",
+	"referencetoken":     "string",
+	"qname":              "string",
+	"float":              "float32",
+	"double":             "float64",
+	"decimal":            "float64",
+	"integer":            "int32",
+	"int":                "int32",
+	"short":              "int16",
+	"byte":               "int8",
+	"long":               "int64",
+	"boolean":            "bool",
+	"datetime":           "soap.XSDDateTime",
+	"date":               "soap.XSDDate",
+	"time":               "soap.XSDTime",
+	"base64binary":       "[]byte",
+	"hexbinary":          "[]byte",
+	"unsignedint":        "uint32",
+	"nonnegativeinteger": "uint32",
+	"unsignedshort":      "uint16",
+	"unsignedbyte":       "byte",
+	"unsignedlong":       "uint64",
+	"anytype":            "string",
+	"anysimpletype":      "string",
+	"ncname":             "string",
+	"anyuri":             "string",
+	"duration":           "string",
 }
 
 func removeNS(xsdType string) string {
@@ -473,10 +525,14 @@ func toGoType(xsdType string, nillable bool) string {
 	// Handles name space, ie. xsd:string, xs:string
 	r := strings.Split(xsdType, ":")
 
-	t := r[0]
+	t := replaceReservedWords(makePublic(r[0]))
 
 	if len(r) == 2 {
-		t = r[1]
+		if r[0] == "xsd" || r[0] == "xs" {
+			t = replaceReservedWords(makePublic(r[1]))
+		} else {
+			t = normalize(r[0]) + "." + replaceReservedWords(makePublic(r[1]))
+		}
 	}
 
 	value := xsd2GoTypes[strings.ToLower(t)]
@@ -488,7 +544,7 @@ func toGoType(xsdType string, nillable bool) string {
 		return value
 	}
 
-	return "*" + replaceReservedWords(makePublic(t))
+	return "*" + t
 }
 
 func removePointerFromType(goType string) string {
