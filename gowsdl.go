@@ -466,7 +466,7 @@ func NormalizePackagePath(value string) string {
 func normalizePackage(value string) string {
 	value = NormalizePackagePath(value)
 
-	return "github.com/eltrac-eu/gonvif/pkg/generated/onvif/" + value
+	return "github.com/eyetowers/gonvif/pkg/generated/onvif/" + value
 }
 
 func NormalizePackageName(value string) string {
