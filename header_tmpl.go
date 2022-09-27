@@ -13,7 +13,7 @@ import (
 	"context"
 	"encoding/xml"
 	"time"
-	"github.com/hooklift/gowsdl/soap"
+	"github.com/eyetowers/gowsdl/soap"
 
 	{{range $k, $v := .Imports}}
 		{{replaceReservedWords $k}} "{{normalizePackage $v}}"

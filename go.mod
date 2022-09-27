@@ -1,4 +1,4 @@
-module github.com/hooklift/gowsdl
+module github.com/eyetowers/gowsdl
 
 go 1.18
 
