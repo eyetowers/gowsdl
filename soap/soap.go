@@ -295,6 +295,7 @@ type basicAuth struct {
 type options struct {
 	tlsCfg           *tls.Config
 	auth             *basicAuth
+	soapAuth         *basicAuth
 	timeout          time.Duration
 	contimeout       time.Duration
 	tlshshaketimeout time.Duration
@@ -342,6 +343,13 @@ func WithRequestTimeout(t time.Duration) Option {
 func WithBasicAuth(login, password string) Option {
 	return func(o *options) {
 		o.auth = &basicAuth{Login: login, Password: password}
+	}
+}
+
+// WithSOAPAuth is an Option to set SOAP headers authentication credentials.
+func WithSOAPAuth(login, password string) Option {
+	return func(o *options) {
+		o.soapAuth = &basicAuth{Login: login, Password: password}
 	}
 }
 
@@ -465,9 +473,14 @@ func (s *Client) call(ctx context.Context, soapAction string, request, response 
 	// SOAP envelope capable of namespace prefixes
 	envelope := SOAPEnvelope{}
 
-	if s.headers != nil && len(s.headers) > 0 {
+	headers := append([]any{}, s.headers...)
+	if s.opts.soapAuth != nil {
+		sec := NewSecurity(s.opts.soapAuth.Login, s.opts.soapAuth.Password)
+		headers = append(headers, sec)
+	}
+	if len(headers) > 0 {
 		envelope.Header = &SOAPHeader{
-			Headers: s.headers,
+			Headers: headers,
 		}
 	}
 
