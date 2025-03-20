@@ -303,6 +303,7 @@ type options struct {
 	httpHeaders      map[string]string
 	mtom             bool
 	mma              bool
+	timeDiff         time.Duration
 }
 
 var defaultOptions = options{
@@ -350,6 +351,15 @@ func WithBasicAuth(login, password string) Option {
 func WithSOAPAuth(login, password string) Option {
 	return func(o *options) {
 		o.soapAuth = &basicAuth{Login: login, Password: password}
+	}
+}
+
+// WithTimeDiff is an Option to specify the current time difference between the target device and
+// us as the client. This is important primarily for soap authentication. Negative values mean
+// the device time is behind our time.
+func WithTimeDiff(diff time.Duration) Option {
+	return func(o *options) {
+		o.timeDiff = diff
 	}
 }
 
@@ -417,6 +427,13 @@ func NewClient(url string, opt ...Option) *Client {
 	}
 }
 
+// SetTimeDiff set the current time difference between the target device and us as the client.
+// This is important primarily for soap authentication. Negative values mean the device time is
+// behind our time.
+func (s *Client) SetTimeDiff(diff time.Duration) {
+	s.opts.timeDiff = diff
+}
+
 // AddHeader adds envelope header
 // For correct behavior, every header must contain a `XMLName` field.  Refer to #121 for details
 func (s *Client) AddHeader(header interface{}) {
@@ -475,7 +492,8 @@ func (s *Client) call(ctx context.Context, soapAction string, request, response 
 
 	headers := append([]any{}, s.headers...)
 	if s.opts.soapAuth != nil {
-		sec := NewSecurity(s.opts.soapAuth.Login, s.opts.soapAuth.Password)
+		t := time.Now().Add(s.opts.timeDiff)
+		sec := NewSecurity(s.opts.soapAuth.Login, s.opts.soapAuth.Password, t)
 		headers = append(headers, sec)
 	}
 	if len(headers) > 0 {
